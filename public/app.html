@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Emotional Damage — App</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=Playfair+Display:ital,wght@0,700;1,400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/theme.css">
+    <link rel="stylesheet" href="/css/app.css">
+  </head>
+  <body class="app-page">
+    <main class="app">
+      <header class="header">
+        <div>
+          <a class="brand" href="/">
+            <span class="brand-dot" aria-hidden="true"></span>
+            Emotional Damage
+          </a>
+          <p class="subtitle">One task at a time</p>
+        </div>
+        <a class="menu-link" href="/">Home</a>
+      </header>
+
+      <section id="alert" class="alert" hidden></section>
+
+      <div class="grid">
+        <section class="panel">
+          <h2>Session</h2>
+          <p class="label">Status</p>
+          <p class="status" id="sessionState">Idle</p>
+          <p class="label">Current task</p>
+          <p id="activeTaskTitle" class="current-task">Add a task to begin.</p>
+          <div class="actions">
+            <button id="startFocus" class="btn btn-primary" type="button">Start</button>
+            <button id="pauseFocus" class="btn" type="button" hidden>Pause</button>
+            <button id="resumeFocus" class="btn" type="button" hidden>Resume</button>
+            <button id="stopFocus" class="btn btn-outline" type="button" hidden>Stop</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Tasks</h2>
+          <form id="taskForm" class="task-form">
+            <input id="taskTitle" name="title" autocomplete="off" maxlength="160" placeholder="Add a task..." required>
+            <button class="btn btn-primary" type="submit">Add</button>
+          </form>
+          <ol id="taskList" class="task-list"></ol>
+          <div id="completedWrap" class="completed-wrap" hidden>
+            <p class="label">Done</p>
+            <ol id="completedList" class="task-list"></ol>
+          </div>
+        </section>
+      </div>
+
+      <footer class="footer">
+        <span id="statusClock">00:00</span>
+        <span>Voice reminders every 5–10 minutes, with a desktop nudge in between</span>
+      </footer>
+    </main>
+
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>

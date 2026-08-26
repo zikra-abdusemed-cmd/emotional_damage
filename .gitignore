@@ -1,0 +1,5 @@
+node_modules/
+data/db.json
+audio/*
+!audio/.gitkeep
+.DS_Store
