@@ -1,8 +1,10 @@
-# Emotional Damage
+# Do the Damn Thing
 
 A local-first focus app for people who struggle to stay on one task at a time.
 
-Add your tasks and start a session. The app picks a random voice from the `audio/` folder at unpredictable intervals between 5 and 10 minutes while you are focusing. Halfway between those voices, a Mac or Windows desktop notification tells you to focus on your first task.
+Add your tasks and start a session. The app picks a random voice from the `audio/` folder at unpredictable intervals between 3 and 10 minutes. Halfway between those voices, and again with each clip, a desktop notification names your prioritized task.
+
+Your Chrome, Edge, Safari, or other browser profile keeps its own cookie, so that profile’s open session, task list, and crossed-off tasks come back when you reopen the app.
 
 ## Run
 
@@ -14,10 +16,11 @@ Open [http://127.0.0.1:3000](http://127.0.0.1:3000).
 
 ## Features
 
-- **Tasks:** add, edit, cross off, reorder priority
-- **Session:** start, pause, resume, stop
-- **Voices:** place reminder clips in the `audio/` folder; one plays at random during a focus session
-- **Desktop nudges:** a Mac or Windows notification halfway between voices: “Focus on your first task” plus that task’s name
+- **Tasks:** add, edit, cross off, reorder priority. Crossed-off tasks stay in Done.
+- **Session:** start, pause, resume, stop — restored when you reopen the same browser profile
+- **Voices:** drop clips in `audio/`; each reminder picks one at random from the whole folder
+- **Desktop nudges:** customized Mac/Windows notifications that name your prioritized task
+- **Landing pulse:** visitor count, people active in the last 15 minutes, and crossed-off tasks
 
 ## Audio folder
 
@@ -32,7 +35,7 @@ audio/
 
 Supported formats: `.mp3`, `.wav`, `.m4a`, `.ogg`
 
-The server scans this folder at runtime. There is no upload UI — you manage the files yourself.
+The server scans this folder (including subfolders) at runtime. Each reminder picks a clip at random. There is no upload UI — you manage the files yourself.
 
 ## Stack
 
@@ -53,7 +56,8 @@ npm run typecheck
 - `PORT`: server port, default `3000`. If unset and 3000 is busy, the server tries 3001–3099 automatically.
 - `HOST`: bind address, default `0.0.0.0` (required for most deployments)
 - `DB_FILE`: optional path for the JSON database
-- `AUDIO_DIR`: optional directory for audio files, default `audio/`
+- `SECURE_COOKIES`: set to `1` to mark the profile cookie Secure (also auto-enabled on HTTPS)
+- `TRUST_PROXY`: set to `1` behind HTTPS reverse proxies (cPanel, nginx) so Secure cookies and HSTS use `X-Forwarded-Proto`
 
 ## Deploy
 
@@ -103,6 +107,8 @@ In cPanel → **Setup Node.js App** → app `em2`:
 | Application startup file | `app.js` |
 | Application mode | Production |
 | Application URL | a real domain/subdomain that already exists in cPanel |
+
+If the site is served over HTTPS through cPanel or another reverse proxy, set `TRUST_PROXY=1` in the Node.js environment so the profile cookie stays Secure.
 
 This app has **no npm packages**. Skip **Run NPM Install**. Click **Start App**.
 

@@ -10,12 +10,27 @@ import {
   parseJsonBody
 } from './validation.mjs';
 import { nextIncompleteTask, normalizeTaskPositions, reorderTasks, sortTasks } from './tasks.mjs';
+import { applyCompletion, applyVisit } from './stats.mjs';
+import {
+  adoptLegacyUser,
+  assertJsonContentType,
+  assertSafeUrl,
+  assertSameOrigin,
+  cacheControlFor,
+  isAudioId,
+  isHttps,
+  isTaskId,
+  needsLegacyAdoption,
+  profileCookie,
+  pruneStore,
+  resolveProfile,
+  securityHeaders
+} from './security.mjs';
 
 const rootDir = resolve(process.cwd());
 const publicDir = resolve(join(rootDir, 'public'));
 const db = new JsonDatabase(process.env.DB_FILE || join(rootDir, 'data', 'db.json'));
 const storage = new LocalAudioStorage(process.env.AUDIO_DIR || join(rootDir, 'audio'));
-const userId = 'local-user';
 const preferredPort = Number(process.env.PORT) || 3000;
 const portIsFixed = process.env.PORT !== undefined && process.env.PORT !== '';
 const host = process.env.HOST || '0.0.0.0';
@@ -54,18 +69,27 @@ function checkRateLimit(req, limit = 120, windowMs = 60_000) {
   }
 }
 
-function sendJson(res, payload, status = 200) {
+function applyHeaders(req, extra = {}) {
+  const headers = { ...securityHeaders(req), ...extra };
+  if (req.profileId) {
+    headers['set-cookie'] = profileCookie(req.profileId, req);
+  }
+  return headers;
+}
+
+function sendJson(res, req, payload, status = 200) {
   const body = JSON.stringify(payload);
-  res.writeHead(status, {
+  res.writeHead(status, applyHeaders(req, {
     'content-type': 'application/json; charset=utf-8',
-    'content-length': Buffer.byteLength(body)
-  });
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store'
+  }));
   res.end(body);
 }
 
-function sendError(res, error) {
+function sendError(res, req, error) {
   const status = error.status || 500;
-  sendJson(res, {
+  sendJson(res, req, {
     error: {
       code: error.code || 'SERVER_ERROR',
       message: status === 500 ? 'Unexpected server error.' : error.message
@@ -84,16 +108,16 @@ function resolvePublicFile(relativePath) {
   return filePath;
 }
 
-async function sendPublicFile(res, relativePath) {
+async function sendPublicFile(res, req, relativePath) {
   const filePath = resolvePublicFile(relativePath);
   const info = await stat(filePath);
   if (!info.isFile()) throw jsonError('Not found.', 404, 'NOT_FOUND');
   const body = await readFile(filePath);
-  res.writeHead(200, {
+  res.writeHead(200, applyHeaders(req, {
     'content-type': mimeTypes.get(extname(filePath)) || 'application/octet-stream',
     'content-length': body.length,
-    'x-content-type-options': 'nosniff'
-  });
+    'cache-control': cacheControlFor(filePath)
+  }));
   res.end(body);
 }
 
@@ -111,8 +135,10 @@ function publicAudio(audio) {
   };
 }
 
-function activeSession(data) {
-  return data.focusSessions.find((session) => ['FOCUSING', 'PAUSED'].includes(session.status)) || null;
+function activeSession(data, userId) {
+  return data.focusSessions.find((session) => (
+    session.userId === userId && ['FOCUSING', 'PAUSED'].includes(session.status)
+  )) || null;
 }
 
 function shiftIso(iso, deltaMs) {
@@ -121,8 +147,8 @@ function shiftIso(iso, deltaMs) {
   return new Date(time + deltaMs).toISOString();
 }
 
-function serializeCurrent(data) {
-  const session = activeSession(data);
+function serializeCurrent(data, userId) {
+  const session = activeSession(data, userId);
   const tasks = sortTasks(data.tasks.filter((task) => task.userId === userId));
   const activeTask = session ? tasks.find((task) => task.id === session.activeTaskId) || null : null;
   return {
@@ -132,23 +158,46 @@ function serializeCurrent(data) {
   };
 }
 
-async function handleTasks(req, res, url) {
+async function mutateDb(userId, mutator) {
+  return db.update((data) => {
+    adoptLegacyUser(data, userId);
+    const result = mutator(data);
+    pruneStore(data);
+    return result;
+  });
+}
+
+async function touchPresence(userId, { countVisitor = false, present = true } = {}) {
+  return db.update((data) => applyVisit(data, userId, { countVisitor, present }));
+}
+
+async function readProfile(userId, reader) {
+  const data = await db.read();
+  if (needsLegacyAdoption(data, userId)) {
+    return mutateDb(userId, reader);
+  }
+  return reader(data);
+}
+
+async function handleTasks(req, res, url, userId) {
   if (req.method === 'GET' && url.pathname === '/api/tasks') {
-    const data = await db.read();
-    sendJson(res, { tasks: sortTasks(data.tasks.filter((task) => task.userId === userId)) });
+    const tasks = await readProfile(userId, (data) => (
+      sortTasks(data.tasks.filter((task) => task.userId === userId))
+    ));
+    sendJson(res, req, { tasks });
     return true;
   }
 
   if (req.method === 'POST' && url.pathname === '/api/tasks') {
     const body = await parseJsonBody(req);
     const title = normalizeTitle(body.title ?? body.text);
-    const result = await db.update((data) => {
+    const result = await mutateDb(userId, (data) => {
       const userTasks = data.tasks.filter((item) => item.userId === userId);
       const created = {
         id: createId('task'),
         userId,
         title,
-        position: userTasks.length + 1,
+        position: userTasks.filter((item) => !item.completed).length + 1,
         completed: false,
         createdAt: nowIso(),
         completedAt: null
@@ -157,43 +206,52 @@ async function handleTasks(req, res, url) {
       data.tasks = normalizeTaskPositions(data.tasks);
       return {
         task: created,
-        current: serializeCurrent(data)
+        current: serializeCurrent(data, userId)
       };
     });
-    sendJson(res, result, 201);
+    sendJson(res, req, result, 201);
     return true;
   }
 
   if (req.method === 'PATCH' && url.pathname === '/api/tasks/reorder') {
     const body = await parseJsonBody(req);
-    const tasks = await db.update((data) => {
+    const orderedIds = Array.isArray(body.orderedIds)
+      ? body.orderedIds
+      : Array.isArray(body.ids) ? body.ids : [];
+    if (orderedIds.some((id) => !isTaskId(id))) {
+      throw jsonError('Invalid task id.', 400, 'INVALID_TASK_ID');
+    }
+    const tasks = await mutateDb(userId, (data) => {
       const mine = data.tasks.filter((task) => task.userId === userId);
       const other = data.tasks.filter((task) => task.userId !== userId);
-      const reordered = reorderTasks(mine, body.orderedIds || body.ids || []);
+      const reordered = reorderTasks(mine, orderedIds);
       data.tasks = [...other, ...reordered];
       return sortTasks(reordered);
     });
-    sendJson(res, { tasks });
+    sendJson(res, req, { tasks });
     return true;
   }
 
   const taskMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)$/);
   if (!taskMatch) return false;
   const id = taskMatch[1];
+  if (!isTaskId(id)) throw jsonError('Task not found.', 404, 'TASK_NOT_FOUND');
 
   if (req.method === 'PATCH') {
     const body = await parseJsonBody(req);
-    const result = await db.update((data) => {
+    const result = await mutateDb(userId, (data) => {
       const task = data.tasks.find((item) => item.id === id && item.userId === userId);
       if (!task) throw jsonError('Task not found.', 404, 'TASK_NOT_FOUND');
       if (body.title !== undefined) task.title = normalizeTitle(body.title);
       if (body.completed !== undefined) {
         const completed = normalizeBoolean(body.completed);
+        const wasCompleted = Boolean(task.completed);
         task.completed = completed;
         task.completedAt = completed ? nowIso() : null;
+        if (completed && !wasCompleted) applyCompletion(data);
       }
 
-      const session = activeSession(data);
+      const session = activeSession(data, userId);
       if (session && session.activeTaskId === task.id && task.completed) {
         const next = nextIncompleteTask(data.tasks.filter((item) => item.userId === userId && item.id !== task.id));
         session.activeTaskId = next?.id || null;
@@ -205,19 +263,21 @@ async function handleTasks(req, res, url) {
       data.tasks = normalizeTaskPositions(data.tasks);
       return {
         task,
-        current: serializeCurrent(data)
+        current: serializeCurrent(data, userId)
       };
     });
-    sendJson(res, result);
+    sendJson(res, req, result);
     return true;
   }
 
   return false;
 }
 
-async function handleFocus(req, res, url) {
+async function handleFocus(req, res, url, userId) {
   if (req.method === 'GET' && url.pathname === '/api/focus/current') {
-    sendJson(res, serializeCurrent(await db.read()));
+    await touchPresence(userId, { present: true });
+    const current = await readProfile(userId, (data) => serializeCurrent(data, userId));
+    sendJson(res, req, current);
     return true;
   }
 
@@ -225,9 +285,9 @@ async function handleFocus(req, res, url) {
   if (req.method !== 'POST') return false;
 
   const action = url.pathname.split('/').pop();
-  const body = await parseJsonBody(req);
-  const current = await db.update((data) => {
-    const existing = activeSession(data);
+  await parseJsonBody(req);
+  const current = await mutateDb(userId, (data) => {
+    const existing = activeSession(data, userId);
     const now = nowIso();
 
     if (action === 'start') {
@@ -246,11 +306,10 @@ async function handleFocus(req, res, url) {
         currentTaskStartedAt: now,
         pausedAt: null,
         endedAt: null,
-        lastReminderAt: null,
-        settings: body.settings || {}
+        lastReminderAt: null
       };
       data.focusSessions.push(session);
-      return serializeCurrent(data);
+      return serializeCurrent(data, userId);
     }
 
     if (!existing) throw jsonError('No active focus session.', 409, 'NO_ACTIVE_SESSION');
@@ -258,11 +317,11 @@ async function handleFocus(req, res, url) {
     if (action === 'pause') {
       existing.status = 'PAUSED';
       existing.pausedAt = now;
-      return serializeCurrent(data);
+      return serializeCurrent(data, userId);
     }
 
     if (action === 'resume') {
-      const task = data.tasks.find((item) => item.id === existing.activeTaskId && !item.completed);
+      const task = data.tasks.find((item) => item.id === existing.activeTaskId && item.userId === userId && !item.completed);
       if (!task) throw jsonError('No active incomplete task to resume.', 409, 'NO_ACTIVE_TASK');
       if (existing.pausedAt) {
         const parsedPause = Date.parse(existing.pausedAt);
@@ -271,27 +330,34 @@ async function handleFocus(req, res, url) {
       }
       existing.status = 'FOCUSING';
       existing.pausedAt = null;
-      existing.settings = body.settings || existing.settings || {};
-      return serializeCurrent(data);
+      return serializeCurrent(data, userId);
     }
 
     if (action === 'end') {
       existing.status = 'ENDED';
       existing.endedAt = now;
       existing.pausedAt = null;
-      return serializeCurrent(data);
+      return serializeCurrent(data, userId);
     }
 
     throw jsonError('Unknown focus action.', 404, 'NOT_FOUND');
   });
-  sendJson(res, current);
+  sendJson(res, req, current);
+  return true;
+}
+
+async function handleStats(req, res, url, userId) {
+  if (url.pathname !== '/api/stats') return false;
+  if (req.method !== 'GET') throw jsonError('Method not allowed.', 405, 'METHOD_NOT_ALLOWED');
+  const payload = await touchPresence(userId, { present: true });
+  sendJson(res, req, payload);
   return true;
 }
 
 async function handleAudio(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/audio') {
     const audio = await storage.listManualFiles();
-    sendJson(res, {
+    sendJson(res, req, {
       audio: audio.map(publicAudio),
       count: audio.length
     });
@@ -300,13 +366,13 @@ async function handleAudio(req, res, url) {
 
   const fileMatch = url.pathname.match(/^\/api\/audio\/([^/]+)\/file$/);
   if (fileMatch && req.method === 'GET') {
+    if (!isAudioId(fileMatch[1])) throw jsonError('Audio not found.', 404, 'AUDIO_NOT_FOUND');
     const audio = await storage.manualFileById(fileMatch[1]);
     if (!audio) throw jsonError('Audio not found.', 404, 'AUDIO_NOT_FOUND');
-    res.writeHead(200, {
+    res.writeHead(200, applyHeaders(req, {
       'content-type': audio.mimeType,
-      'cache-control': 'private, max-age=3600',
-      'x-content-type-options': 'nosniff'
-    });
+      'cache-control': 'private, max-age=3600'
+    }));
     storage.streamManualFile(audio.filename).pipe(res);
     return true;
   }
@@ -314,17 +380,23 @@ async function handleAudio(req, res, url) {
   return false;
 }
 
-async function serveStatic(req, res, url) {
-  const pathname = decodeURIComponent(url.pathname);
+async function serveStatic(req, res, url, profile) {
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    throw jsonError('Not found.', 404, 'NOT_FOUND');
+  }
 
   const pageFile = pageRoutes.get(pathname);
   if (pageFile) {
-    await sendPublicFile(res, pageFile);
+    await touchPresence(profile.id, { countVisitor: profile.isNew, present: true });
+    await sendPublicFile(res, req, pageFile);
     return;
   }
 
-  if (/^\/(css|js)\/.+/.test(pathname)) {
-    await sendPublicFile(res, pathname);
+  if (/^\/(css|js)\/[^./][^/]*$/.test(pathname)) {
+    await sendPublicFile(res, req, pathname);
     return;
   }
 
@@ -333,11 +405,30 @@ async function serveStatic(req, res, url) {
 
 const server = createServer(async (req, res) => {
   try {
-    checkRateLimit(req);
-    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    assertSafeUrl(req);
+    assertSameOrigin(req);
+    const method = String(req.method || 'GET').toUpperCase();
+    checkRateLimit(req, method === 'GET' || method === 'HEAD' ? 180 : 60);
+    const profile = resolveProfile(req);
+    req.profileId = profile.id;
+    req.profileIsNew = profile.isNew;
+    if (method === 'OPTIONS') {
+      res.writeHead(204, applyHeaders(req, { allow: 'GET, HEAD, POST, PATCH, OPTIONS' }));
+      res.end();
+      return;
+    }
+    let url;
+    try {
+      const originBase = `${isHttps(req) ? 'https' : 'http'}://${req.headers.host || '127.0.0.1'}`;
+      url = new URL(req.url, originBase);
+    } catch {
+      throw jsonError('Not found.', 404, 'NOT_FOUND');
+    }
+    if (url.pathname.startsWith('/api/')) assertJsonContentType(req);
     if (
-      (await handleTasks(req, res, url)) ||
-      (await handleFocus(req, res, url)) ||
+      (await handleTasks(req, res, url, profile.id)) ||
+      (await handleFocus(req, res, url, profile.id)) ||
+      (await handleStats(req, res, url, profile.id)) ||
       (await handleAudio(req, res, url))
     ) {
       return;
@@ -345,9 +436,9 @@ const server = createServer(async (req, res) => {
     if (url.pathname.startsWith('/api/')) {
       throw jsonError('Route not found.', 404, 'NOT_FOUND');
     }
-    await serveStatic(req, res, url);
+    await serveStatic(req, res, url, profile);
   } catch (error) {
-    if (!res.headersSent) sendError(res, error);
+    if (!res.headersSent) sendError(res, req, error);
     else req.destroy(error);
   }
 });
@@ -384,7 +475,7 @@ async function startServer() {
       server.once('error', reject);
       server.listen('passenger', resolve);
     });
-    console.log('Emotional Damage running behind Passenger');
+    console.log('Do the Damn Thing running behind Passenger');
     return;
   }
 
@@ -396,7 +487,7 @@ async function startServer() {
       if (candidate !== preferredPort) {
         console.warn(`Port ${preferredPort} was in use; using ${port} instead.`);
       }
-      console.log(`Emotional Damage running at http://${host}:${port}`);
+      console.log(`Do the Damn Thing running at http://${host}:${port}`);
       console.log(`Landing page: http://${host}:${port}/`);
       console.log(`App:          http://${host}:${port}/app`);
       return;

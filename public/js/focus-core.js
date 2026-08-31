@@ -7,7 +7,7 @@ export const SESSION_STATUSES = Object.freeze({
 });
 
 export const WARMUP_SETTINGS = Object.freeze({
-  minIntervalMinutes: 5,
+  minIntervalMinutes: 3,
   maxIntervalMinutes: 10,
   audioEnabled: true,
   volume: 0.85,
@@ -15,7 +15,7 @@ export const WARMUP_SETTINGS = Object.freeze({
 });
 
 export const FOCUSING_SETTINGS = Object.freeze({
-  minIntervalMinutes: 5,
+  minIntervalMinutes: 3,
   maxIntervalMinutes: 10,
   audioEnabled: true,
   volume: 0.85,
@@ -24,6 +24,8 @@ export const FOCUSING_SETTINGS = Object.freeze({
 
 const MIN_ALLOWED_MS = 15 * 1000;
 const MAX_ALLOWED_MS = 60 * 60 * 1000;
+const POLICY_MIN_INTERVAL_MINUTES = 3;
+const POLICY_MAX_INTERVAL_MINUTES = 10;
 
 export function clampNumber(value, min, max, fallback) {
   const number = Number(value);
@@ -32,34 +34,13 @@ export function clampNumber(value, min, max, fallback) {
 }
 
 export function normalizeReminderSettings(settings = {}) {
-  const minMinutes = clampNumber(
-    settings.minIntervalMinutes,
-    MIN_ALLOWED_MS / 60000,
-    MAX_ALLOWED_MS / 60000,
-    WARMUP_SETTINGS.minIntervalMinutes
-  );
-  const maxMinutes = clampNumber(
-    settings.maxIntervalMinutes,
-    MIN_ALLOWED_MS / 60000,
-    MAX_ALLOWED_MS / 60000,
-    WARMUP_SETTINGS.maxIntervalMinutes
-  );
-  const normalized = {
-    minIntervalMinutes: Math.min(minMinutes, maxMinutes),
-    maxIntervalMinutes: Math.max(minMinutes, maxMinutes),
+  return {
+    minIntervalMinutes: POLICY_MIN_INTERVAL_MINUTES,
+    maxIntervalMinutes: POLICY_MAX_INTERVAL_MINUTES,
     audioEnabled: settings.audioEnabled !== false,
     volume: clampNumber(settings.volume, 0, 1, WARMUP_SETTINGS.volume),
     avoidRecentAudio: settings.avoidRecentAudio !== false
   };
-
-  if (normalized.minIntervalMinutes === normalized.maxIntervalMinutes) {
-    normalized.maxIntervalMinutes = Math.min(60, normalized.minIntervalMinutes + 1);
-    if (normalized.maxIntervalMinutes === normalized.minIntervalMinutes) {
-      normalized.minIntervalMinutes = Math.max(0.25, normalized.maxIntervalMinutes - 1);
-    }
-  }
-
-  return normalized;
 }
 
 export function getRandomDelay(minMs, maxMs, random = Math.random) {
@@ -94,7 +75,7 @@ export class RecentAudioSelector {
       if (fresh.length > 0) candidates = fresh;
     }
 
-    const index = Math.floor(this.random() * candidates.length);
+    const index = Math.min(candidates.length - 1, Math.floor(this.random() * candidates.length));
     const selected = candidates[index];
     this.remember(selected.id);
     return selected;
@@ -125,6 +106,9 @@ export class ReminderScheduler {
     this.nudgeTimerId = null;
     this.running = false;
     this.lastDelayMs = null;
+    this.cycleStartedAt = null;
+    this.nudgeFired = false;
+    this.voiceFired = false;
   }
 
   start() {
@@ -143,10 +127,15 @@ export class ReminderScheduler {
       this.random
     );
     this.lastDelayMs = delay;
+    this.cycleStartedAt = Date.now();
+    this.nudgeFired = false;
+    this.voiceFired = false;
     this.timerId = this.setTimer(async () => {
       this.timerId = null;
       this.cancelNudge();
       if (!this.running) return;
+      this.voiceFired = true;
+      this.nudgeFired = true;
       await this.onReminder();
       if (this.running) this.scheduleNext();
     }, delay);
@@ -155,11 +144,28 @@ export class ReminderScheduler {
     if (this.onFocusNudge && nudgeDelay > 0 && nudgeDelay < delay) {
       this.nudgeTimerId = this.setTimer(async () => {
         this.nudgeTimerId = null;
-        if (!this.running) return;
+        if (!this.running || this.nudgeFired) return;
+        this.nudgeFired = true;
         await this.onFocusNudge();
       }, nudgeDelay);
     }
     return delay;
+  }
+
+  async catchUp(now = Date.now()) {
+    if (!this.running || this.cycleStartedAt == null || this.lastDelayMs == null) return;
+    const elapsed = now - this.cycleStartedAt;
+    if (this.onFocusNudge && !this.nudgeFired && elapsed >= Math.floor(this.lastDelayMs / 2)) {
+      this.nudgeFired = true;
+      this.cancelNudge();
+      await this.onFocusNudge();
+    }
+    if (!this.voiceFired && elapsed >= this.lastDelayMs) {
+      this.voiceFired = true;
+      this.cancel();
+      await this.onReminder();
+      if (this.running) this.scheduleNext();
+    }
   }
 
   pause() {
@@ -206,25 +212,68 @@ export class NotificationManager {
     if (!this.isSupported()) return 'unsupported';
     if (this.NotificationApi.permission === 'granted') return 'granted';
     if (this.NotificationApi.permission === 'denied') return 'denied';
-    return this.NotificationApi.requestPermission();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value || this.NotificationApi.permission || 'default');
+      };
+      try {
+        const result = this.NotificationApi.requestPermission(finish);
+        if (result && typeof result.then === 'function') result.then(finish, () => finish('denied'));
+      } catch {
+        finish('denied');
+      }
+    });
   }
 
-  show({ title = 'Focus Reminder', body = 'Get back to your task.', tag = 'emotional-damage' } = {}) {
+  show({ title = 'Focus Reminder', body = 'Get back to your task.', tag = 'do-the-damn-thing-focus' } = {}) {
     if (!this.isSupported() || this.NotificationApi.permission !== 'granted') return false;
-    const notification = new this.NotificationApi(title, {
-      body,
-      tag,
-      silent: false,
-      renotify: true
-    });
-    if (typeof notification.addEventListener === 'function') {
-      notification.addEventListener('click', () => {
-        globalThis.focus?.();
-        notification.close?.();
+    try {
+      const notification = new this.NotificationApi(title, {
+        body,
+        tag,
+        silent: false
       });
+      if (typeof notification.addEventListener === 'function') {
+        notification.addEventListener('click', () => {
+          globalThis.focus?.();
+          notification.close?.();
+        });
+      }
+      return true;
+    } catch {
+      return false;
     }
-    return true;
   }
+}
+
+export function focusNotificationCopy(taskTitle, random = Math.random) {
+  const task = String(taskTitle || '').trim() || 'your prioritized task';
+  const templates = [
+    {
+      title: 'Focus on your prioritized task',
+      body: `Stay on “${task}”. That is first on your list — everything else can wait.`
+    },
+    {
+      title: 'Back to your priority',
+      body: `Focus on “${task}”. One task at a time.`
+    },
+    {
+      title: 'This is the task',
+      body: `Come back to “${task}”. It is your prioritized work.`
+    },
+    {
+      title: 'Don’t switch tasks',
+      body: `Keep going on “${task}”. Leave the rest of the list alone.`
+    }
+  ];
+  const index = Math.min(templates.length - 1, Math.floor(random() * templates.length));
+  return {
+    ...templates[index],
+    tag: 'do-the-damn-thing-focus'
+  };
 }
 
 export function elapsedSeconds(startedAt, pausedAt = null, now = Date.now()) {

@@ -6,29 +6,30 @@ import {
   RecentAudioSelector,
   ReminderScheduler,
   WARMUP_SETTINGS,
+  focusNotificationCopy,
   getRandomDelay,
   normalizeReminderSettings
 } from '../public/js/focus-core.js';
 
-const FIVE_MIN = 5 * 60_000;
+const THREE_MIN = 3 * 60_000;
 const TEN_MIN = 10 * 60_000;
 
-test('focus reminders stay between 5 and 10 minutes', () => {
+test('focus reminders stay between 3 and 10 minutes', () => {
   const warmup = normalizeReminderSettings(WARMUP_SETTINGS);
   const focusing = normalizeReminderSettings(FOCUSING_SETTINGS);
-  assert.equal(warmup.minIntervalMinutes, 5);
+  assert.equal(warmup.minIntervalMinutes, 3);
   assert.equal(warmup.maxIntervalMinutes, 10);
-  assert.equal(focusing.minIntervalMinutes, 5);
+  assert.equal(focusing.minIntervalMinutes, 3);
   assert.equal(focusing.maxIntervalMinutes, 10);
 
   for (const random of [0, 0.25, 0.5, 0.9999]) {
-    const delay = getRandomDelay(FIVE_MIN, TEN_MIN, () => random);
-    assert.ok(delay >= FIVE_MIN);
+    const delay = getRandomDelay(THREE_MIN, TEN_MIN, () => random);
+    assert.ok(delay >= THREE_MIN);
     assert.ok(delay <= TEN_MIN);
   }
-  assert.equal(getRandomDelay(FIVE_MIN, TEN_MIN, () => 0), FIVE_MIN);
-  assert.ok(getRandomDelay(FIVE_MIN, TEN_MIN, () => 0.9999) <= TEN_MIN);
-  assert.ok(getRandomDelay(FIVE_MIN, TEN_MIN, () => 0.9999) >= FIVE_MIN);
+  assert.equal(getRandomDelay(THREE_MIN, TEN_MIN, () => 0), THREE_MIN);
+  assert.ok(getRandomDelay(THREE_MIN, TEN_MIN, () => 0.9999) <= TEN_MIN);
+  assert.ok(getRandomDelay(THREE_MIN, TEN_MIN, () => 0.9999) >= THREE_MIN);
 });
 
 test('random delay is always inside the configured range', () => {
@@ -47,11 +48,11 @@ test('random delay can produce different values', () => {
 
 test('settings validate minimum and maximum intervals', () => {
   const settings = normalizeReminderSettings({ minIntervalMinutes: -1, maxIntervalMinutes: 0.1 });
-  assert.ok(settings.minIntervalMinutes >= 0.25);
-  assert.ok(settings.maxIntervalMinutes > settings.minIntervalMinutes);
+  assert.equal(settings.minIntervalMinutes, 3);
+  assert.equal(settings.maxIntervalMinutes, 10);
 });
 
-test('scheduler uses a 5 to 10 minute gap', () => {
+test('scheduler uses a random 3 to 10 minute gap', () => {
   const delays = [];
   const scheduler = new ReminderScheduler({
     getSettings: () => WARMUP_SETTINGS,
@@ -65,7 +66,7 @@ test('scheduler uses a 5 to 10 minute gap', () => {
   });
   scheduler.start();
   assert.equal(delays.length, 1);
-  assert.ok(delays[0] >= FIVE_MIN);
+  assert.ok(delays[0] >= THREE_MIN);
   assert.ok(delays[0] <= TEN_MIN);
 });
 
@@ -74,9 +75,14 @@ test('scheduler reschedules after firing and avoids duplicate timers', async () 
   const cleared = [];
   let nextId = 1;
   let reminders = 0;
+  let randomValue = 0.1;
   const scheduler = new ReminderScheduler({
     getSettings: () => ({ minIntervalMinutes: 1, maxIntervalMinutes: 2 }),
-    random: () => 0.5,
+    random: () => {
+      const value = randomValue;
+      randomValue = 0.9;
+      return value;
+    },
     setTimer: (fn, delay) => {
       const id = nextId++;
       scheduled.push({ id, fn, delay });
@@ -95,6 +101,7 @@ test('scheduler reschedules after firing and avoids duplicate timers', async () 
   await scheduled.at(-1).fn();
   assert.equal(reminders, 1);
   assert.equal(scheduled.length, 2);
+  assert.notEqual(scheduled[0].delay, scheduled[1].delay);
 });
 
 test('paused and ended schedulers do not trigger reminders', async () => {
@@ -224,7 +231,28 @@ test('audio selector ignores disabled audio', () => {
   assert.equal(selector.select([{ id: 'x', enabled: false }]), null);
 });
 
-test('notification manager handles disabled, denied, granted, and unsupported states', async () => {
+test('audio selector eventually uses every clip in a 21-file library', () => {
+  const items = Array.from({ length: 21 }, (_, index) => ({
+    id: `clip-${index}`,
+    category: 'GENERAL',
+    enabled: true
+  }));
+  const selector = new RecentAudioSelector({ historySize: 12 });
+  const seen = new Set();
+  for (let index = 0; index < 400; index += 1) {
+    seen.add(selector.select(items).id);
+  }
+  assert.equal(seen.size, 21);
+});
+
+test('notification copy names the prioritized task', () => {
+  const copy = focusNotificationCopy('Finish taxes', () => 0);
+  assert.match(copy.title, /priorit/i);
+  assert.match(copy.body, /Finish taxes/);
+  assert.equal(copy.tag, 'do-the-damn-thing-focus');
+});
+
+test('notification manager is safe when unsupported or denied', async () => {
   assert.equal(new NotificationManager(undefined).permission(), 'unsupported');
   let shown = 0;
   class FakeNotification {
@@ -240,6 +268,28 @@ test('notification manager handles disabled, denied, granted, and unsupported st
   assert.equal(await denied.requestPermission(), 'denied');
   assert.equal(denied.show(), false);
   FakeNotification.permission = 'granted';
-  assert.equal(denied.show(), true);
+  assert.equal(denied.show({ title: 'Focus on your prioritized task', body: 'Stay on “Finish taxes”.' }), true);
   assert.equal(shown, 1);
+});
+
+test('scheduler catch-up fires overdue focus nudges', async () => {
+  let nudges = 0;
+  let voices = 0;
+  const scheduler = new ReminderScheduler({
+    getSettings: () => ({ minIntervalMinutes: 1, maxIntervalMinutes: 2 }),
+    random: () => 0.5,
+    setTimer: () => 1,
+    clearTimer: () => {},
+    onReminder: async () => {
+      voices += 1;
+    },
+    onFocusNudge: async () => {
+      nudges += 1;
+    }
+  });
+  scheduler.start();
+  scheduler.cycleStartedAt = Date.now() - Math.floor(scheduler.lastDelayMs / 2) - 1;
+  await scheduler.catchUp();
+  assert.equal(nudges, 1);
+  assert.equal(voices, 0);
 });

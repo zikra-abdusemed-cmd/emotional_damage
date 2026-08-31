@@ -24,7 +24,12 @@ export function parseJsonBody(req, maxBytes = 1024 * 1024) {
         return;
       }
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          reject(jsonError('Invalid JSON body.', 400, 'INVALID_JSON'));
+          return;
+        }
+        resolve(parsed);
       } catch {
         reject(jsonError('Invalid JSON body.', 400, 'INVALID_JSON'));
       }
@@ -50,7 +55,7 @@ export function normalizeTitle(title) {
 export function normalizeBoolean(value, fallback = false) {
   if (typeof value === 'boolean') return value;
   if (value === undefined || value === null) return fallback;
-  if (value === 'true') return true;
-  if (value === 'false') return false;
-  return Boolean(value);
+  if (value === 'true' || value === 1) return true;
+  if (value === 'false' || value === 0) return false;
+  throw jsonError('Invalid boolean value.', 400, 'INVALID_BOOLEAN');
 }

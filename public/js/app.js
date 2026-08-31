@@ -4,7 +4,8 @@ import {
   RecentAudioSelector,
   ReminderScheduler,
   SESSION_STATUSES,
-  WARMUP_SETTINGS
+  WARMUP_SETTINGS,
+  focusNotificationCopy
 } from './focus-core.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -33,7 +34,7 @@ const els = {
   statusClock: $('#statusClock')
 };
 
-const audioSelector = new RecentAudioSelector({ historySize: 3 });
+const audioSelector = new RecentAudioSelector({ historySize: 12 });
 const notifications = new NotificationManager();
 const player = new Audio();
 player.preload = 'auto';
@@ -46,9 +47,14 @@ const scheduler = new ReminderScheduler({
 });
 
 async function api(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (options.body && !headers['content-type']) {
+    headers['content-type'] = 'application/json';
+  }
   const response = await fetch(path, {
-    headers: { 'content-type': 'application/json' },
-    ...options
+    credentials: 'same-origin',
+    ...options,
+    headers
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -247,28 +253,31 @@ function syncScheduler() {
   scheduler.stop();
 }
 
-function firstOpenTask() {
+function prioritizedTask() {
   return state.activeTask || state.tasks.find((task) => !task.completed) || null;
 }
 
 function showFocusNotification() {
-  const task = firstOpenTask();
+  const task = prioritizedTask();
   if (!task || state.session?.status !== SESSION_STATUSES.FOCUSING) return false;
-  return notifications.show({
-    title: 'Focus on your first task',
-    body: task.title,
-    tag: 'emotional-damage-focus'
-  });
+  return notifications.show(focusNotificationCopy(task.title));
+}
+
+async function ensureNotificationPermission() {
+  const permission = await notifications.requestPermission();
+  if (permission === 'denied') {
+    showAlert('Enable notifications in Chrome, Edge, or Safari so reminders can name your prioritized task.');
+  }
+  return permission;
 }
 
 async function triggerReminder() {
-  const activeTask = state.activeTask;
+  const activeTask = prioritizedTask();
   if (!activeTask || state.session?.status !== SESSION_STATUSES.FOCUSING) return;
   await loadAudio();
-  const selected = audioSelector.select(state.audio, [], state.reminderPhase === 'warmup'
-    ? WARMUP_SETTINGS.avoidRecentAudio
-    : FOCUSING_SETTINGS.avoidRecentAudio);
+  const selected = audioSelector.select(state.audio);
   state.reminderPhase = 'focusing';
+  showFocusNotification();
 
   if (selected) {
     try {
@@ -276,6 +285,8 @@ async function triggerReminder() {
     } catch (error) {
       showAlert(`Voice playback failed: ${error.message}`);
     }
+  } else {
+    showAlert('No audio files found in the audio folder.');
   }
 }
 
@@ -284,6 +295,7 @@ async function playAudio(audio) {
   player.currentTime = 0;
   player.src = audio.streamUrl;
   player.volume = FOCUSING_SETTINGS.volume;
+  player.load();
   await player.play();
 }
 
@@ -295,12 +307,13 @@ async function startFocus() {
       return;
     }
     resetReminderPhase();
-    await notifications.requestPermission();
+    await ensureNotificationPermission();
     const current = await api('/api/focus/start', {
       method: 'POST',
       body: JSON.stringify({})
     });
     applyCurrent(current);
+    showFocusNotification();
   } catch (error) {
     showAlert(error.message);
   }
@@ -318,12 +331,13 @@ async function pauseFocus() {
 async function resumeFocus() {
   try {
     resetReminderPhase();
-    await notifications.requestPermission();
+    await ensureNotificationPermission();
     const current = await api('/api/focus/resume', {
       method: 'POST',
       body: JSON.stringify({})
     });
     applyCurrent(current);
+    showFocusNotification();
   } catch (error) {
     showAlert(error.message);
   }
@@ -395,9 +409,19 @@ function bindEvents() {
   els.resumeFocus?.addEventListener('click', resumeFocus);
   els.stopFocus?.addEventListener('click', stopFocus);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && state.session?.status === SESSION_STATUSES.FOCUSING) scheduler.start();
+    if (document.hidden || state.session?.status !== SESSION_STATUSES.FOCUSING) return;
+    scheduler.catchUp();
+    scheduler.start();
   });
   window.addEventListener('beforeunload', () => scheduler.stop());
+}
+
+async function heartbeatPresence() {
+  try {
+    await api('/api/stats');
+  } catch {
+    // Presence is best-effort and does not interrupt focus sessions.
+  }
 }
 
 function updateClock() {
@@ -412,3 +436,4 @@ bindEvents();
 updateClock();
 setInterval(updateClock, 30_000);
 loadAll();
+setInterval(heartbeatPresence, 30_000);
