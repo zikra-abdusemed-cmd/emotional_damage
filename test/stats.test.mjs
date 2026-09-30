@@ -5,8 +5,13 @@ import { applyCompletion, applyVisit, publicStats } from '../src/stats.mjs';
 const profileA = 'profile_aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const profileB = 'profile_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
-test('public stats never include presence records', () => {
+test('public stats never include presence records and count completed tasks across profiles', () => {
   const data = {
+    tasks: [
+      { userId: profileA, completed: true },
+      { userId: profileB, completed: true },
+      { userId: profileA, completed: false }
+    ],
     stats: {
       visitors: 4,
       completed: 9,
@@ -16,7 +21,7 @@ test('public stats never include presence records', () => {
   const payload = publicStats(data);
   assert.deepEqual(Object.keys(payload).sort(), ['activeUsers', 'crossedOff', 'visitors']);
   assert.equal(payload.visitors, 4);
-  assert.equal(payload.crossedOff, 9);
+  assert.equal(payload.crossedOff, 2);
   assert.equal(payload.activeUsers, 1);
 });
 
@@ -31,9 +36,13 @@ test('unique visitors increment once and active users follow recent presence', (
   assert.equal(publicStats(data).activeUsers, 2);
 });
 
-test('crossed-off count is cumulative', () => {
-  const data = { stats: { visitors: 0, completed: 0, lastSeen: {} } };
+test('crossed-off count reflects the current completed-task total', () => {
+  const data = {
+    tasks: [{ userId: profileA, completed: false }],
+    stats: { visitors: 0, completed: 0, lastSeen: {} }
+  };
   applyCompletion(data);
-  applyCompletion(data);
-  assert.equal(publicStats(data).crossedOff, 2);
+  assert.equal(publicStats(data).crossedOff, 0);
+  data.tasks[0].completed = true;
+  assert.equal(publicStats(data).crossedOff, 1);
 });

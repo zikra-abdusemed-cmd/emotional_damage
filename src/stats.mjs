@@ -45,6 +45,9 @@ export function prunePresence(lastSeen, now = Date.now()) {
 
 export function publicStats(data, now = Date.now()) {
   const stats = ensureStats(data);
+  const crossedOff = Array.isArray(data.tasks)
+    ? data.tasks.filter((task) => task && task.completed).length
+    : 0;
   let activeUsers = 0;
   for (const iso of Object.values(stats.lastSeen)) {
     const time = Date.parse(iso);
@@ -53,7 +56,7 @@ export function publicStats(data, now = Date.now()) {
   return {
     visitors: stats.visitors,
     activeUsers,
-    crossedOff: stats.completed
+    crossedOff
   };
 }
 

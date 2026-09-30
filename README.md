@@ -57,11 +57,19 @@ npm run typecheck
 - `HOST`: bind address, default `0.0.0.0` (required for most deployments)
 - `DB_FILE`: optional path for the JSON database
 - `SECURE_COOKIES`: set to `1` to mark the profile cookie Secure (also auto-enabled on HTTPS)
-- `TRUST_PROXY`: set to `1` behind HTTPS reverse proxies (cPanel, nginx) so Secure cookies and HSTS use `X-Forwarded-Proto`
+- `TRUST_PROXY`: set to `1` behind reverse proxies (cPanel, nginx) so Secure cookies and HSTS use `X-Forwarded-Proto` and rate limiting uses the client address from `X-Forwarded-For`. Enabled automatically under Passenger.
+- `AUDIO_DIR`: optional path for the voice clip folder, default `audio/`
 
 ## Deploy
 
-Use `npm start` (not `npm run dev`) in production.
+Use `npm start` (not `npm run dev`) in production. Requires Node.js 18 or newer.
+
+Checklist:
+
+- **Upload the audio clips yourself.** `audio/*` is gitignored, so a git-based deploy ships an empty folder.
+- **Do not upload your local `data/db.json`.** The server creates a fresh one on first run.
+- **Run a single app process.** The JSON database lives in one process; several Passenger/cluster workers writing it at once can lose updates.
+- **Serve over HTTPS** and set `TRUST_PROXY=1` (or `SECURE_COOKIES=1`) so the profile cookie is marked Secure.
 
 If port 3000 is already taken on your server, set `PORT` to whatever your host assigns:
 
@@ -85,15 +93,15 @@ Can't acquire lock for app: em2
 2. Open **Terminal** or SSH and run:
 
 ```sh
-# replace adhdfrve with your cPanel username
-pkill -u adhdfrve -f "node src/server.mjs" || true
-pkill -u adhdfrve -f "em2" || true
+# replace <cpanel-user> with your cPanel username
+pkill -u <cpanel-user> -f "node src/server.mjs" || true
+pkill -u <cpanel-user> -f "em2" || true
 ```
 
 3. In **File Manager**, delete any stale `.lock` file, usually at:
 
 ```text
-/home/adhdfrve/nodevenv/em2/.lock
+/home/<cpanel-user>/nodevenv/em2/.lock
 ```
 
 (or under your domain folder inside `nodevenv/`)
@@ -125,7 +133,7 @@ cPanel sets `PORT` automatically when you use **Start**. Your site URL is config
 
 | Button | Use it? | Why |
 |---|---|---|
-| **Run NPM Install** | Yes | installs dependencies |
+| **Run NPM Install** | Optional | there are no dependencies, so it does nothing |
 | **Start / Restart** | Yes | runs the server via `app.js` |
 | **Stop** | Yes | stops the server before redeploying |
 | **Run script** → `dev` | **No** | hangs forever, breaks cPanel |
@@ -134,4 +142,4 @@ cPanel sets `PORT` automatically when you use **Start**. Your site URL is config
 
 The `Cannot read properties of null (reading 'details')` error is a cPanel UI bug caused by running `dev` or `start` from **Run script**. Those scripts never finish, so cPanel gets a null response and crashes.
 
-If **Start** still fails, the old process is probably still stuck. Do **Stop** → delete `.lock` → **Run NPM Install** → **Restart**.
+If **Start** still fails, the old process is probably still stuck. Do **Stop** → delete `.lock` → **Restart**.

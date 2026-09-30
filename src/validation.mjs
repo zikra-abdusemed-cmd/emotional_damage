@@ -5,7 +5,7 @@ export function jsonError(message, status = 400, code = 'BAD_REQUEST') {
   return error;
 }
 
-export function parseJsonBody(req, maxBytes = 1024 * 1024) {
+export function parseJsonBody(req, maxBytes = 64 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;

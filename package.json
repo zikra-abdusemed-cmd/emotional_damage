@@ -12,7 +12,7 @@
     "typecheck": "node scripts/typecheck.mjs"
   },
   "engines": {
-    "node": ">=16"
+    "node": ">=18"
   },
   "dependencies": {}
 }

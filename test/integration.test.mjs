@@ -116,6 +116,9 @@ test('integration suite', async (t) => {
   });
 
   await t.test('task and focus flows persist completed work', async () => {
+    const noTasks = await request('POST', '/api/focus/start', { jar, body: {} });
+    assert.equal(noTasks.status, 409);
+
     const created = await request('POST', '/api/tasks', { jar, body: { title: 'Write tests' } });
     assert.equal(created.status, 201);
     assert.equal(created.json.task.title, 'Write tests');
@@ -187,6 +190,16 @@ test('integration suite', async (t) => {
     const stream = await request('GET', streamUrl, { jar });
     assert.equal(stream.status, 200);
     assert.match(stream.contentType, /audio/);
+
+    const partial = await fetch(`http://127.0.0.1:${port}${streamUrl}`, { headers: { range: 'bytes=0-3', cookie: jar.cookie } });
+    assert.equal(partial.status, 206);
+    assert.equal(partial.headers.get('accept-ranges'), 'bytes');
+    assert.equal(partial.headers.get('content-range'), 'bytes 0-3/10');
+    assert.equal(await partial.text(), 'fake');
+
+    const unsatisfiable = await fetch(`http://127.0.0.1:${port}${streamUrl}`, { headers: { range: 'bytes=50-', cookie: jar.cookie } });
+    assert.equal(unsatisfiable.status, 416);
+    await unsatisfiable.text();
 
     const bad = await request('GET', '/api/audio/not-valid/file', { jar });
     assert.equal(bad.status, 404);

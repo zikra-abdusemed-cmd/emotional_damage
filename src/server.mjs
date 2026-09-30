@@ -52,10 +52,28 @@ const pageRoutes = new Map([
   ['/app.html', 'app.html']
 ]);
 
+const MAX_OPEN_TASKS = 200;
+const trustProxy = process.env.TRUST_PROXY === '1' || globalThis.PhusionPassenger !== undefined;
 const rateBuckets = new Map();
 
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateBuckets) {
+    if (now > bucket.resetAt) rateBuckets.delete(key);
+  }
+}, 60_000).unref();
+
+function clientKey(req) {
+  if (trustProxy) {
+    // The proxy appends the real client address as the last hop.
+    const hops = String(req.headers['x-forwarded-for'] || '').split(',').map((hop) => hop.trim()).filter(Boolean);
+    if (hops.length) return hops[hops.length - 1];
+  }
+  return req.socket.remoteAddress || 'local';
+}
+
 function checkRateLimit(req, limit = 120, windowMs = 60_000) {
-  const key = req.socket.remoteAddress || 'local';
+  const key = clientKey(req);
   const now = Date.now();
   const bucket = rateBuckets.get(key) || { count: 0, resetAt: now + windowMs };
   if (now > bucket.resetAt) {
@@ -193,6 +211,9 @@ async function handleTasks(req, res, url, userId) {
     const title = normalizeTitle(body.title ?? body.text);
     const result = await mutateDb(userId, (data) => {
       const userTasks = data.tasks.filter((item) => item.userId === userId);
+      if (userTasks.filter((item) => !item.completed).length >= MAX_OPEN_TASKS) {
+        throw jsonError(`You can have at most ${MAX_OPEN_TASKS} open tasks.`, 409, 'TOO_MANY_TASKS');
+      }
       const created = {
         id: createId('task'),
         userId,
@@ -354,6 +375,25 @@ async function handleStats(req, res, url, userId) {
   return true;
 }
 
+function parseRange(header, size) {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim());
+  if (!match || (!match[1] && !match[2])) return 'invalid';
+  let start;
+  let end;
+  if (!match[1]) {
+    const suffix = Number(match[2]);
+    if (suffix === 0) return 'invalid';
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(match[1]);
+    end = match[2] ? Math.min(Number(match[2]), size - 1) : size - 1;
+  }
+  if (start > end || start >= size) return 'invalid';
+  return { start, end };
+}
+
 async function handleAudio(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/audio') {
     const audio = await storage.listManualFiles();
@@ -365,15 +405,34 @@ async function handleAudio(req, res, url) {
   }
 
   const fileMatch = url.pathname.match(/^\/api\/audio\/([^/]+)\/file$/);
-  if (fileMatch && req.method === 'GET') {
+  if (fileMatch && (req.method === 'GET' || req.method === 'HEAD')) {
     if (!isAudioId(fileMatch[1])) throw jsonError('Audio not found.', 404, 'AUDIO_NOT_FOUND');
     const audio = await storage.manualFileById(fileMatch[1]);
     if (!audio) throw jsonError('Audio not found.', 404, 'AUDIO_NOT_FOUND');
-    res.writeHead(200, applyHeaders(req, {
+    const range = parseRange(req.headers.range, audio.size);
+    if (range === 'invalid') {
+      res.writeHead(416, applyHeaders(req, { 'content-range': `bytes */${audio.size}` }));
+      res.end();
+      return true;
+    }
+    const headers = {
       'content-type': audio.mimeType,
-      'cache-control': 'private, max-age=3600'
-    }));
-    storage.streamManualFile(audio.filename).pipe(res);
+      'cache-control': 'private, max-age=3600',
+      'accept-ranges': 'bytes',
+      'content-length': range ? range.end - range.start + 1 : audio.size
+    };
+    if (range) headers['content-range'] = `bytes ${range.start}-${range.end}/${audio.size}`;
+    res.writeHead(range ? 206 : 200, applyHeaders(req, headers));
+    if (req.method === 'HEAD') {
+      res.end();
+      return true;
+    }
+    const stream = storage.streamManualFile(audio.filename, range || undefined);
+    stream.on('error', (error) => {
+      console.error(error);
+      res.destroy(error);
+    });
+    stream.pipe(res);
     return true;
   }
 

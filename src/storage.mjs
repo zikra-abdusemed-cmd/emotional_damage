@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { extname, join, relative, resolve, sep } from 'node:path';
 
@@ -101,8 +101,8 @@ export class LocalAudioStorage {
     }
   }
 
-  streamManualFile(filename) {
-    return createReadStream(this.resolveManualFilename(filename));
+  streamManualFile(filename, range) {
+    return createReadStream(this.resolveManualFilename(filename), range);
   }
 
   describe(filename, mimeType, info) {
@@ -116,13 +116,21 @@ export class LocalAudioStorage {
       enabled: true,
       createdAt: info.birthtime.toISOString(),
       updatedAt: info.mtime.toISOString(),
+      size: info.size,
       filename,
       streamUrl: `/api/audio/${id}/file`
     };
   }
 
   async mimeTypeFor(filename, fallback) {
-    const header = await readFile(this.resolveManualFilename(filename), { encoding: null, flag: 'r' });
+    const handle = await open(this.resolveManualFilename(filename), 'r');
+    let header;
+    try {
+      const { buffer, bytesRead } = await handle.read(Buffer.alloc(12), 0, 12, 0);
+      header = buffer.subarray(0, bytesRead);
+    } finally {
+      await handle.close();
+    }
     if (header.length >= 12 && header.subarray(0, 4).toString() === 'RIFF' && header.subarray(8, 12).toString() === 'WAVE') {
       return 'audio/wav';
     }

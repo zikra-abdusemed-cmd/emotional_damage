@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
@@ -38,19 +39,20 @@ export class JsonDatabase {
 
   async write(data) {
     await mkdir(dirname(this.filePath), { recursive: true });
-    const tempPath = `${this.filePath}.tmp`;
+    const tempPath = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
     await rename(tempPath, this.filePath);
   }
 
   async update(mutator) {
-    this.queue = this.queue.then(async () => {
+    const update = this.queue.catch(() => {}).then(async () => {
       const data = await this.read();
       const result = await mutator(data);
       await this.write(data);
       return result;
     });
-    return this.queue;
+    this.queue = update;
+    return update;
   }
 }
 
@@ -59,5 +61,5 @@ export function nowIso() {
 }
 
 export function createId(prefix) {
-  return `${prefix}_${crypto.randomUUID()}`;
+  return `${prefix}_${randomUUID()}`;
 }
