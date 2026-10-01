@@ -209,6 +209,12 @@ test('integration suite', async (t) => {
     assert.equal(refreshed.json.count, 3);
   });
 
+  await t.test('health check responds without touching the database', async () => {
+    const health = await request('GET', '/healthz');
+    assert.equal(health.status, 200);
+    assert.deepEqual(health.json, { ok: true });
+  });
+
   await t.test('cross-origin writes are rejected', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
       method: 'POST',

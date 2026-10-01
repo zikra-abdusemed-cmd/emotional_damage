@@ -56,6 +56,7 @@ npm run typecheck
 - `PORT`: server port, default `3000`. If unset and 3000 is busy, the server tries 3001–3099 automatically.
 - `HOST`: bind address, default `0.0.0.0` (required for most deployments)
 - `DB_FILE`: optional path for the JSON database
+- `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`: store the data in Upstash Redis instead of `DB_FILE` (for hosts without a persistent disk)
 - `SECURE_COOKIES`: set to `1` to mark the profile cookie Secure (also auto-enabled on HTTPS)
 - `TRUST_PROXY`: set to `1` behind reverse proxies (cPanel, nginx) so Secure cookies and HSTS use `X-Forwarded-Proto` and rate limiting uses the client address from `X-Forwarded-For`. Enabled automatically under Passenger.
 - `AUDIO_DIR`: optional path for the voice clip folder, default `audio/`
@@ -78,6 +79,23 @@ PORT=8080 npm start
 ```
 
 If the app fails with `EADDRINUSE` and you set `PORT` explicitly, another process is using that port — stop it or pick a different one. Without `PORT` set, the app auto-finds the next open port starting at 3000.
+
+## Deploy for free (Render + Upstash)
+
+Render's free web service has no persistent disk, so the data lives in a free Upstash Redis database instead. The app keeps the data in memory and saves it to Upstash a few seconds after each change, and again when Render shuts it down.
+
+1. **Create the database.** Sign up at [upstash.com](https://upstash.com) (no card needed) and create a Redis database. On its page, copy `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`.
+2. **Commit the voice clips.** Render builds from git and `audio/*` is gitignored. Remove the two `audio` lines from `.gitignore`, then commit the `audio/` folder.
+3. **Push the repo to GitHub.**
+4. **Create the service.** In Render → **New** → **Blueprint**, pick the repo. Render reads `render.yaml` and asks for the two Upstash values; paste them in.
+
+Free-tier trade-offs:
+
+- Render puts the app to sleep after 15 minutes with no visitors. The next visit takes about 30–60 seconds to load.
+- Changes from the last few seconds can be lost if the app crashes (a normal sleep or redeploy saves first).
+- Run only one instance. Several instances would overwrite each other's data.
+
+Serverless hosts such as Vercel or Netlify do not work: their filesystem is read-only and not shared between requests, and they serve `public/` from a CDN rather than from the server.
 
 ## Deploy on cPanel (Node.js Selector)
 

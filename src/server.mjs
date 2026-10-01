@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
-import { JsonDatabase, createId, nowIso } from './db.mjs';
+import { JsonDatabase, UpstashDatabase, createId, nowIso } from './db.mjs';
 import { LocalAudioStorage } from './storage.mjs';
 import {
   jsonError,
@@ -29,7 +29,15 @@ import {
 
 const rootDir = resolve(process.cwd());
 const publicDir = resolve(join(rootDir, 'public'));
-const db = new JsonDatabase(process.env.DB_FILE || join(rootDir, 'data', 'db.json'));
+if (process.env.UPSTASH_REDIS_REST_URL && !process.env.UPSTASH_REDIS_REST_TOKEN) {
+  throw new Error('UPSTASH_REDIS_REST_TOKEN must be set when UPSTASH_REDIS_REST_URL is set.');
+}
+const db = process.env.UPSTASH_REDIS_REST_URL
+  ? new UpstashDatabase({
+    url: process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN
+  })
+  : new JsonDatabase(process.env.DB_FILE || join(rootDir, 'data', 'db.json'));
 const storage = new LocalAudioStorage(process.env.AUDIO_DIR || join(rootDir, 'audio'));
 const preferredPort = Number(process.env.PORT) || 3000;
 const portIsFixed = process.env.PORT !== undefined && process.env.PORT !== '';
@@ -109,7 +117,7 @@ function sendError(res, req, error) {
   const status = error.status || 500;
   sendJson(res, req, {
     error: {
-      code: error.code || 'SERVER_ERROR',
+      code: status === 500 ? 'SERVER_ERROR' : error.code || 'SERVER_ERROR',
       message: status === 500 ? 'Unexpected server error.' : error.message
     }
   }, status);
@@ -483,6 +491,10 @@ const server = createServer(async (req, res) => {
     } catch {
       throw jsonError('Not found.', 404, 'NOT_FOUND');
     }
+    if (url.pathname === '/healthz' && (method === 'GET' || method === 'HEAD')) {
+      sendJson(res, req, { ok: true });
+      return;
+    }
     if (url.pathname.startsWith('/api/')) assertJsonContentType(req);
     if (
       (await handleTasks(req, res, url, profile.id)) ||
@@ -566,7 +578,21 @@ async function startServer() {
   process.exit(1);
 }
 
+async function shutdown(signal) {
+  console.log(`${signal} received, saving data and shutting down.`);
+  server.close();
+  try {
+    await db.flush?.();
+  } catch (error) {
+    console.error(error);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
 if (process.env.NODE_TEST !== '1') {
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
   startServer().catch((error) => {
     console.error(error);
     process.exit(1);
